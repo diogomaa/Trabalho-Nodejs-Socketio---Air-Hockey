@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="pt">
+	<head>
+		<meta charset="utf-8" />
+		<title>ECGM NO GELO!</title>
+		
+		<style>
+			* {
+				font-family: 'Gunship', arial;
+			}
+			
+			h1, p {
+				text-align: center;
+			}
+			
+			canvas {
+				border: 1px solid black;
+				background-image: url("../media/field.png");
+				background-size: cover;
+			}
+			
+			#canvasContainer {
+				width: 100%;
+				text-align: center;
+			}
+
+		</style>
+		
+		<!-- Carregue em socket.io -->
+		<script src="/socket.io/socket.io.js"></script>
+		
+		<link href="http://allfont.net/allfont.css?fonts=gunship" rel="stylesheet" type="text/css">
+		<link rel="shortcut icon" type="image/png" href="/images/air-hockey.png"/>
+		<link rel="shortcut icon" type="image/png" href="../media/air-hockey.png"/>
+		<script>
+			"use strict";
+			
+			(function() {
+			
+
+			// Onde vamos armazenar a canvas/tela e contexto
+
+			var canvas;
+			var ctx;
+			
+			// O offscreen canvas, para buffer de dados de imagem
+			var bufferCanvas;
+			var bufferCtx;
+			
+			
+
+			// Outros vários elementos DOM e de tela usados para feedback do jogo/servidor
+			var serverInfo;
+			var notification;
+			
+			// Variáveis do jogo
+			var socket; // socket do utilizador
+			var side = {		//de que lado o jogador estará - esquerda (0) ou direita (1)
+				is: 0
+			}
+			var user = {	// informações sobre o utilizador
+				username: "",
+				pos: {
+					x: 0,
+					y: 0
+				},
+				points: 0,
+				img: new Image()
+			};
+			var otherUser = { // informações sobre o outro utilizador inimigo
+				username: "",
+				pos: {
+					x: -64,
+					y: -64
+				},
+				points: 0,
+				img: new Image(),
+				lastTime: new Date().getTime()
+			};
+			var puck = { // informações sobre o disco=puck
+				pos: {
+					x: 640,
+					y: 400 
+				},
+				vel: {
+					x: 0,
+					y: 0
+				},
+				img: new Image(),
+				radius: 25,
+				lastTime: new Date().getTime()
+			};
+			
+			// Conecta-se ao servidor socket.io
+			// Configura delegados de evento de socket  para comunicação do servidor
+			function connectSocket(e) {
+			
+				// Conecta ao socket.io
+				// A variável io é uma var global do script socket.io acima
+				socket = io.connect();
+				
+				// emite sua posição inicial
+				socket.emit("update", {pos: user.pos})
+				// Chamadas drawImg, que são emitidas quando um novo utilizador se conecta
+				
+				socket.on("msg", function(data) {
+					serverInfo.innerHTML = data.msg;
+				});
+			
+				// Listener para evento de conexão do utilizador
+				socket.on("connect", function(){
+					console.log("Connecting...");
+					
+					// recupera o nome de utilizador do campo de entrada para enviar para o servidor
+					user.username = document.querySelector('#username').value;
+					
+					// para entradas inválidas, gere um nome de utilizador aleatório
+					if (!user.username || user.username === "") {
+						user.username = 'user' + Math.floor(Math.random()*1000000);
+					}
+					
+					socket.emit("join", { name: user.username });
+				});
+				
+				// dados de atualização enviados pelo GameManager
+				socket.on("updateInfo", function(data) {
+					// GameManager nos diz qual objeto está a atualizar em data.object
+					switch (data.object) {
+						// adiciona todas as chaves enviadas aos nossos dados do utilizador
+						case "user":
+							if (data.pos) {
+								user.pos = data.pos;
+							}
+							if (data.side) {
+								side.is = data.side;
+								Object.freeze(side);
+							}
+							if (data.username) {
+								user.username = data.username;
+							}
+							break;
+						case "otherUser":
+							// atualiza somente outro utilizador se os novos dados forem mais recentes
+							if (data.time > otherUser.lastTime) {
+								if (data.pos) {
+									otherUser.pos = data.pos;
+								}
+								if (data.username) {
+									otherUser.username = data.username;
+								}
+								
+								// atualiza seu último horário atualizado para o horário deste pacote
+								otherUser.lastTime = data.time;
+							}
+							break;
+						case "puck":
+							// atualiza apenas o puck se os novos dados forem mais recentes
+							if (data.time > puck.lastTime) {
+								puck.pos = data.pos;
+								puck.vel = data.vel;
+								
+								// atualiza o tempo atualizado do disco para o tempo deste pacote
+								puck.lastTime = data.time;
+							}
+							break;
+					}
+				});
+			
+				// Ouça o servidor nos dizendo que alguém marcou um ponto
+				socket.on("scorePoint", function(data) {
+				// data.side diz qual lado foi marcado em
+				// neste caso, perdemos o ponto
+					if (data.side === side.is) {
+						++otherUser.points;
+					}
+					// não marcou golo - nós devemos ter marcado
+			
+					else {
+						++user.points;
+					}
+				});
+				
+				// Entrada bem sucedida, e esconde os botões de conexão
+				socket.on("joinSuccess", function() {
+					document.querySelector('#joinForm').style.display = "none";
+				});
+				
+			// uma "notificação de tela" do servidor, que é exibida na tela
+			// A notificação é apagada após a quantidade de tempo passada na função
+				socket.on("notify", function(data) {
+					// atualiza a notificação global
+					notification = data.msg;
+					
+					// se o servidor envia uma duração <= 0, é permanente
+					if (data.duration > 0) {
+						// redefine a notificação após o término da duração
+						setTimeout(function(currentNotif) {
+							// apaga a notificação se não foi overwritten
+							if (notification === data.msg) {
+								notification = "";
+							}
+							
+						}, data.duration);
+					}
+				});
+				
+			//servidor nos diz para começar o jogo
+				socket.on("beginPlay", update);
+			}
+			
+			// Uma função auxiliar para atualizar posições
+				// Retorna o valor preso dentro de min e max
+			function clamp(val, min, max) {
+				return Math.max(min, Math.min(val, max));
+			}
+			
+			// Inicializa as variáveis de tela e emite uma nova chamada de desenho para outras telas
+			function init() {
+				// pegue a tela/canvas e  contexto
+				canvas = document.querySelector('canvas');
+				ctx = canvas.getContext('2d');
+
+				// cria um offscreen buffer canvas e captura seu contexto
+		
+				bufferCanvas = document.createElement('canvas');
+				bufferCtx = bufferCanvas.getContext('2d');
+				
+				// pegue todos os outros elementos DOM que usamos para exibir informações do servidor
+				serverInfo = document.querySelector('#serverInfo');
+				
+				// prepare connect button for making server connection
+				document.querySelector('#connect').addEventListener('click', connectSocket);
+			
+				// recebe callbacks de canvas mouseover para atualizar a posição do paddle
+				document.addEventListener('mousemove', function(e) {
+					var canvasPos = canvas.getBoundingClientRect();
+					user.pos.x = clamp(e.x - canvasPos.left, (side.is*canvas.width/2) + user.img.width/2, (side.is*canvas.width/2)+canvas.width/2-user.img.width/2);
+					user.pos.y = clamp(e.y - canvasPos.top, user.img.width/2, canvas.height-user.img.height/2);
+				})
+				
+				// carrega ícones do servidor
+				user.img.src = "../media/user2.png";
+				otherUser.img.src = "../media/user1.png";
+				puck.img.src = "../media/disc.png";
+				
+				// tela de configuração para desenhar texto
+				ctx.font = "14pt 'Gunship'";
+			}
+			
+			// O loop principal de desenho e atualização, que é iniciado assim que o jogo começa
+			function update() {
+				ctx.clearRect(0, 0, canvas.width, canvas.height);
+				
+				// atualiza a posição do disco
+				puck.pos.x += puck.vel.x;
+				puck.pos.y += puck.vel.y;
+				
+				// O client simulará a física do disco aqui no caso de alguma desconexão do servidor // tentar devolver o disco ás paredes
+				bouncePuck();
+				
+				// aplica fricção ao disco
+				puck.vel.x *= 0.9975;
+				puck.vel.y *= 0.9975;
+				
+				// desenhe os três elementos do jogo
+				ctx.drawImage(puck.img, puck.pos.x - puck.img.width/2, puck.pos.y - puck.img.height/2);
+				ctx.drawImage(user.img, user.pos.x - user.img.width/2, user.pos.y - user.img.height/2);
+				ctx.drawImage(otherUser.img, otherUser.pos.x - otherUser.img.width/2, otherUser.pos.y - otherUser.img.height/2);
+				
+				// desenha as pontuações nos cantos
+				ctx.save();
+					// desenhe as pontuações no lado correto, dependendo do lado em que estamos jogando
+					if (side.is === 0) {
+						ctx.fillText(user.username + ": " + user.points, 5, 25);
+						ctx.textAlign = "end";
+						ctx.fillText(otherUser.points + " :" + otherUser.username, canvas.width - 5, 25);
+					}
+					else {
+						ctx.fillText(otherUser.username + ": " + otherUser.points, 5, 25);
+						ctx.textAlign = "end";
+						ctx.fillText(user.points + " :" + user.username, canvas.width - 5, 25);
+					}
+				ctx.restore();
+				
+				// emite nossa posição para o outro utilizador
+				socket.emit("update", {pos: user.pos})
+				
+				// desenha a notificação atual do servidor
+				if (notification != "") {
+					ctx.save();
+						ctx.font = "36pt Gunship";
+						ctx.textAlign = "center"
+						ctx.textBaseline = "middle";
+						ctx.fillText(notification, canvas.width/2, canvas.height/3);
+					ctx.restore();
+				}
+				
+				// solicita o próximo frame
+				requestAnimationFrame(update);
+			}
+	
+			/* bouncePuck()
+				verifica a posição do disco e o joga fora das paredes
+				*/
+			function bouncePuck() {
+				// saltar para a esquerda para a direita
+				if ((puck.pos.x - puck.radius < 0) || (puck.pos.x + puck.radius > canvas.width)) {
+					puck.vel.x *= -1;
+				}
+				
+				// saltar de cima para baixo
+				if ((puck.pos.y - puck.radius < 0) || (puck.pos.y + puck.radius > canvas.height)) {
+					puck.vel.y *= -1;
+				}
+			}
+			
+			
+			window.onload = init;
+			})();
+		</script>
+	</head>
+	
+	<body>
+		<h1>ECGM NO GELO!</h1>
+		
+		<p id="serverInfo">Intruduza o nome para jogar com outro jogador.</p>
+		
+		<p id="joinForm">
+			<label for="user">Nome:</label>
+			<input id="username" name="user" type="text"/>
+			<input id="connect" type='button' value='Jogar!'/>
+		</p>
+		<div id="canvasContainer">
+			<canvas width="1280" height="800"></canvas>
+		</div>
+		<p>Trabalho realizado por: Diogo Amorim e André Castro</p>
+
+
+	</body>
+</html>
